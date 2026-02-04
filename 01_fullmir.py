@@ -52,7 +52,7 @@ out_directory = (
 
 # Process maximum number of rounds
 max_rounds = args.rounds
-if max_rounds <= 0:
+if max_rounds < 0:
     max_rounds = 1000
 
 read_dir = in_directory + "random/"
@@ -91,6 +91,7 @@ ip = gp.read(read_dir + str(args.index).zfill(4) + ".mps")
 ip.Params.OutputFlag = 0
 ip.Params.LogFile = ""
 ip.Params.TimeLimit = 3600 * 0.5
+ip.Params.Threads = 1
 
 print("Solving IP")
 ip.optimize()
@@ -132,18 +133,26 @@ problemfile = results_dir + "problems_" + instance_name + ".txt"
 
 rounds = 0
 continuar = True
-tic = time.time()
-nic = time.process_time()
-separator = Mirsep(ip, solution, 5, 600)
-toc = time.time()
-noc = time.process_time()
 
-print("created separator in ", toc - tic, "wall seconds")
-print("created separator in ", noc - nic, "cpu seconds")
+if max_rounds > 0:
+    tic = time.time()
+    nic = time.process_time()
+    separator = Mirsep(ip, solution, 5, 600)
+    toc = time.time()
+    noc = time.process_time()
 
+    print("created separator in ", toc - tic, "wall seconds")
+    print("created separator in ", noc - nic, "cpu seconds")
 
 while continuar:
-    print("Starting separation")
+    if rounds >= max_rounds:
+        continuar = False
+        print("reached maximum number of rounds ", max_rounds)
+        with open(problemfile, "a") as f:
+            f.write("Reached maximum number of rounds " + str(max_rounds) + "\n")
+        break
+
+    print("Starting round ", rounds, " of separation")
     tic = time.time()
     nic = time.process_time()
     separator.build_model(logs_dir + str(rounds).zfill(4) + ".log")
@@ -151,13 +160,18 @@ while continuar:
     noc = time.process_time()
     print("built model in ", toc - tic, "wall seconds")
     print("built model in ", noc - nic, "cpu seconds")
+
+    #### DEBUG DEBUG DEBUG
+    separator.model.Params.NodeLimit = 1
+    separator.model.Params.Presolve = 0
+    
     separator.solve()
     print("Finished separation")
 
     if separator.model.status not in [2, 9, 11]:
         print(
             problem_name,
-            instance,
+            # instance,
             " broke in separation with status ",
             separator.model.status,
         )
@@ -287,33 +301,29 @@ while continuar:
         for i in range(len(new_solution))
     ]
 
-    if rounds >= max_rounds:
-        continuar = False
-        print("reached maximum number of rounds ", max_rounds)
-        with open(problemfile, "a") as f:
-            f.write("Reached maximum number of rounds " + str(max_rounds) + "\n")
-
     if gap_closed_all >= 100:
         continuar = False
-        print("closed all gap")
+        print("Round ", rounds, ": closed all gap")
         with open(problemfile, "a") as f:
-            f.write("closed all gap\n")
+            f.write("closed all gap in round " + str(rounds) + "\n")
 
     if np.allclose(new_solution, solution):
         continuar = False
-        print("point is not separated")
+        print("Round ", rounds, ": point is not separated")
         with open(problemfile, "a") as f:
-            f.write("Point is not separated\n")
-    
+            f.write("Point is not separated in round " + str(rounds) + "\n")
+
     # Else, continue
     if continuar:
         solution = copy.deepcopy(new_solution)
-        rounds = rounds + 1
         tic = time.time()
         nic = time.process_time()
         separator.update_solution(solution)
         toc = time.time()
         noc = time.process_time()
-        print("updated solution in ", toc - tic, "wall seconds")
-        print("updated solution in ", noc - nic, "cpu seconds")
-        
+
+        rounds = rounds + 1
+
+        print("Round ", rounds, ": updated solution in ", toc - tic, "wall seconds")
+        print("Round ", rounds, ": updated solution in ", noc - nic, "cpu seconds")
+
