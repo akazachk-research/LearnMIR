@@ -4,43 +4,72 @@
 ##############################################################################
 
 import os
+import sys
 import gurobipy as gp
 import numpy as np
 import argparse
 from utils import is_integer, existing_sol
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-problem", type=int, default=0)
-parser.add_argument("-instances", type=int, default=10)
+# parser.add_argument("-instance", "--instance", type=str, default="")
+parser.add_argument("-in_directory", "--in_directory", type=str, default="")
+parser.add_argument("-out_directory", "--out_directory", type=str, default="./goodfiles/")
+parser.add_argument("-problem", "--problem", type=str, default="")
+parser.add_argument("-instances", "--instances", type=int, default=10)
 args = parser.parse_args()
 
+# instance = args.instance
+# if instance == "":
+#     print("Please provide an instance file")
+#     sys.exit(0)
 
-directory = "./goodinstances/"
-files = os.listdir(directory)
+in_directory = args.in_directory
+if in_directory == "":
+    print("Please provide a directory name where the data is located")
+    sys.exit(0)
 
-for file in files:
-    if ".csv" in file:
-        files.remove(file)
+if in_directory[-1] != "/":
+    in_directory = in_directory + "/"
 
-files.sort()
+out_directory = args.out_directory
+if out_directory == "":
+    print("Please provide a directory name where the data is to be saved")
+    sys.exit(0)
 
-problem = files[args.problem].split(sep=".")[0]
+if out_directory[-1] != "/":
+    out_directory = out_directory + "/"
+
+# files = os.listdir(in_directory)
+
+# for file in files:
+#     if ".csv" in file:
+#         files.remove(file)
+
+# files.sort()
+
+# problem = files[args.problem].split(sep=".")[0]
+problem_name = args.problem
+if problem_name == "":
+    print("Please provide a problem name")
+    sys.exit(0)
 
 max_instances = args.instances
-problem_path = "./goodfiles/" + problem + "/"
-instance = "./goodinstances/" + problem
+instance = in_directory + problem_name + ".mps"
+problem_path = out_directory + problem_name + "/"
 
 # Read the instance
-m = gp.read(instance + ".mps")
+m = gp.read(instance)
 
 # Create the file structure for the output
 instances_path = problem_path + "random/"
+
+# make directories but do not throw error if they already exist
 try:
-    os.makedirs(problem_path)
+    os.makedirs(problem_path, exist_ok=True)
 except OSError as error:
     print(error)
 try:
-    os.makedirs(instances_path)
+    os.makedirs(instances_path, exist_ok=True)
 except OSError as error:
     print(error)
 

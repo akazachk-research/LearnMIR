@@ -14,8 +14,11 @@ import gurobipy as gp
 from mirsep import Mirsep
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-problem", type=int, default=0)
-parser.add_argument("-index", type=int, default=0)
+parser.add_argument("-directory", "--directory", type=str, default="")
+parser.add_argument("-problem", "--problem", type=str, default="")
+parser.add_argument("-index", "--index", "-i", type=int, default=0)
+parser.add_argument("-rounds", "--rounds", "-r", type=int, default=0)
+parser.add_argument("-outdir", "--outdir", "-out_directory", "--out_directory", type=str, default="results")
 args = parser.parse_args()
 
 base_dir = "./goodinstances/"
@@ -25,50 +28,70 @@ for file in all_instances:
         all_instances.remove(file)
 all_instances.sort()
 
+# problem_name = all_instances[args.problem].split(sep=".")[0]
+problem_name = args.problem
+if problem_name == "":
+    print("Please provide a problem name")
+    sys.exit(0)
+directory_name = args.directory
+if directory_name == "":
+    print("Please provide a directory name where the data is located")
+    sys.exit(0)
 
-problem_name = all_instances[args.problem].split(sep=".")[0]
-directory = (
+in_directory = (
     # "/blue/akazachkov/o.guaje/" + "gooddata/" + problem_name + "/"
-    "./goodfiles/"
+    directory_name
+    + "/"
     + problem_name
     + "/"
 )
 
-read_dir = directory + "random/"
+out_directory = (
+    args.outdir + "/" + problem_name + "/"
+)
 
-alphas_dir = directory + "cuts/" + str(args.index).zfill(4) + "/"
+# Process maximum number of rounds
+max_rounds = args.rounds
+if max_rounds < 0:
+    max_rounds = 1000
+
+read_dir = in_directory + "random/"
+
+alphas_dir = out_directory + "cuts/" + str(args.index).zfill(4) + "/"
 try:
     os.makedirs(alphas_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-sols_dir = directory + "sols/" + str(args.index).zfill(4) + "/"
+sols_dir = out_directory + "sols/" + str(args.index).zfill(4) + "/"
 try:
     os.makedirs(sols_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-multipliers_dir = directory + "lambdas/" + str(args.index).zfill(4) + "/"
+multipliers_dir = out_directory + "lambdas/" + str(args.index).zfill(4) + "/"
 try:
     os.makedirs(multipliers_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-logs_dir = directory + "base_logs/" + str(args.index).zfill(4) + "/"
+logs_dir = out_directory + "base_logs/" + str(args.index).zfill(4) + "/"
 try:
     os.makedirs(logs_dir, exist_ok=True)
 except FileExistsError:
     pass
 
 
-instance = all_instances[args.problem]
-instance_id = instance.split(sep=".")[0]
+# instance = all_instances[args.problem]
+# instance_id = instance.split(sep=".")[0]
+instance_id = problem_name
 
 ip = gp.read(read_dir + str(args.index).zfill(4) + ".mps")
 
 ip.Params.OutputFlag = 0
 ip.Params.LogFile = ""
 ip.Params.TimeLimit = 3600 * 0.5
+ip.Params.Threads = 1
 
 print("Solving IP")
 ip.optimize()
@@ -76,7 +99,8 @@ print("Solved IP")
 print(ip.Runtime)
 
 if ip.Status != 2:
-    print(problem_name, instance, " broke on IP solve with status ", ip.Status)
+    # print(problem_name, instance, " broke on IP solve with status ", ip.Status)
+    print(problem_name, " broke on IP solve with status ", ip.Status)
     sys.exit(0)
 
 
@@ -97,7 +121,7 @@ old_solution = copy.deepcopy(solution)
 logfile = logs_dir + instance_id + "_"
 
 # results_dir = "/blue/akazachkov/o.guaje/results/"
-results_dir = directory + "results/"
+results_dir = out_directory + "results/"
 try:
     os.mkdir(results_dir)
 except FileExistsError:
@@ -109,18 +133,26 @@ problemfile = results_dir + "problems_" + instance_name + ".txt"
 
 rounds = 0
 continuar = True
-tic = time.time()
-nic = time.process_time()
-separator = Mirsep(ip, solution, 5, 600)
-toc = time.time()
-noc = time.process_time()
 
-print("created separator in ", toc - tic, "wall seconds")
-print("created separator in ", noc - nic, "cpu seconds")
+if max_rounds > 0:
+    tic = time.time()
+    nic = time.process_time()
+    separator = Mirsep(ip, solution, 5, 600)
+    toc = time.time()
+    noc = time.process_time()
 
+    print("created separator in ", toc - tic, "wall seconds")
+    print("created separator in ", noc - nic, "cpu seconds")
 
 while continuar:
-    print("Starting separation")
+    if rounds >= max_rounds:
+        continuar = False
+        print("reached maximum number of rounds ", max_rounds)
+        with open(problemfile, "a") as f:
+            f.write("Reached maximum number of rounds " + str(max_rounds) + "\n")
+        break
+
+    print("Starting round ", rounds, " of separation")
     tic = time.time()
     nic = time.process_time()
     separator.build_model(logs_dir + str(rounds).zfill(4) + ".log")
@@ -128,13 +160,18 @@ while continuar:
     noc = time.process_time()
     print("built model in ", toc - tic, "wall seconds")
     print("built model in ", noc - nic, "cpu seconds")
+
+    #### DEBUG DEBUG DEBUG
+    separator.model.Params.NodeLimit = 1
+    separator.model.Params.Presolve = 0
+    
     separator.solve()
     print("Finished separation")
 
     if separator.model.status not in [2, 9, 11]:
         print(
             problem_name,
-            instance,
+            # instance,
             " broke in separation with status ",
             separator.model.status,
         )
@@ -263,23 +300,30 @@ while continuar:
         np.allclose(old_solution[i], new_solution, atol=1.0e-4)
         for i in range(len(new_solution))
     ]
-    if not np.allclose(new_solution, solution):
+
+    if gap_closed_all >= 100:
+        continuar = False
+        print("Round ", rounds, ": closed all gap")
+        with open(problemfile, "a") as f:
+            f.write("closed all gap in round " + str(rounds) + "\n")
+
+    if np.allclose(new_solution, solution):
+        continuar = False
+        print("Round ", rounds, ": point is not separated")
+        with open(problemfile, "a") as f:
+            f.write("Point is not separated in round " + str(rounds) + "\n")
+
+    # Else, continue
+    if continuar:
         solution = copy.deepcopy(new_solution)
-        rounds = rounds + 1
         tic = time.time()
         nic = time.process_time()
         separator.update_solution(solution)
         toc = time.time()
         noc = time.process_time()
-        print("updated solution in ", toc - tic, "wall seconds")
-        print("updated solution in ", noc - nic, "cpu seconds")
-    else:
-        continuar = False
-        print("point is not separated")
-        with open(problemfile, "a") as f:
-            f.write("Point is not separated\n")
-    if gap_closed_all >= 100:
-        continuar = False
-        print("closed all gap")
-        with open(problemfile, "a") as f:
-            f.write("closed all gap\n")
+
+        rounds = rounds + 1
+
+        print("Round ", rounds, ": updated solution in ", toc - tic, "wall seconds")
+        print("Round ", rounds, ": updated solution in ", noc - nic, "cpu seconds")
+
