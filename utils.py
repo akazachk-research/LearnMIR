@@ -1,6 +1,7 @@
 import numpy as np
 import math
 from sklearn.preprocessing import PolynomialFeatures
+from dataclasses import dataclass
 
 
 # Functions to check if a solution is already added and if it is integer
@@ -11,7 +12,7 @@ def existing_sol(sols, new_sol):
     return np.sum(comparisons) > 0
 
 
-def is_integer(new_sol):
+def is_integer_sol(new_sol):
     for i in range(len(new_sol)):
         if new_sol[i] - math.floor(new_sol[i]) > 1.0e-4 and new_sol[
             i
@@ -882,3 +883,385 @@ def is_mixedbinary(row, rhs, sense, types):
     if "I" in non_zero_types:
         return False
     return True
+
+
+def var_features(lp, new_sol, types, polyexp=False, eps=1e-4):
+    matrixA = lp.getA()
+    matrixA = matrixA.toarray()
+
+    ids = np.array(list(range(matrixA.shape[1])))
+
+    variables = lp.getVars()
+
+    is_int = np.array(
+        [1 if types[i] == "I" else 0 for i in range(len(variables))]
+    )
+    is_bin = np.array(
+        [1 if types[i] == "B" else 0 for i in range(len(variables))]
+    )
+
+    non_trivial_lb = np.array(
+        [1 if variables[i].LB > 1e-6 else 0 for i in range(len(variables))]
+    )
+    non_trivial_ub = np.array(
+        [1 if variables[i].UB < 1e6 else 0 for i in range(len(variables))]
+    )
+
+    is_non_zero = np.array(
+        [1 if abs(new_sol[i]) > eps else 0 for i in range(len(new_sol))]
+    )
+
+    is_ub = np.array(
+        [
+            1 if abs(variables[i].UB - new_sol[i]) < eps else 0
+            for i in range(len(new_sol))
+        ]
+    )
+    is_lb = np.array(
+        [
+            1 if abs(variables[i].LB - new_sol[i]) < eps else 0
+            for i in range(len(new_sol))
+        ]
+    )
+
+    variable_degree = (matrixA != 0).sum(axis=0)
+
+    dataset = np.c_[
+        is_int,
+        is_bin,
+        is_non_zero,
+        is_ub,
+        is_lb,
+        non_trivial_lb,
+        non_trivial_ub,
+        variable_degree,
+    ]
+
+    column_names = [
+        "is_int",
+        "is_bin",
+        "is_non_zero",
+        "is_ub",
+        "is_lb",
+        "non_trivial_lb",
+        "non_trivial_ub",
+        "variable_degree",
+    ]
+
+    coef_mean = matrixA.mean(axis=0)
+    coef_std = matrixA.std(axis=0)
+    coef_min = matrixA.min(axis=0)
+    coef_max = matrixA.max(axis=0)
+
+    dataset = np.c_[dataset, coef_mean, coef_std, coef_min, coef_max]
+    column_names = column_names + [
+        "coef_mean",
+        "coef_std",
+        "coef_min",
+        "coef_max",
+    ]
+
+    cost_vector = np.array([var.Obj for var in variables])
+    cost_bin = np.array(
+        [1 if abs(cost_vector[i]) > eps else 0 for i in range(len(variables))]
+    )
+    normalized_costs = abs(np.array(cost_vector)) / np.max(
+        abs(np.array(cost_vector))
+    )
+    top_costs = np.argsort(normalized_costs)[::-1]
+    top_1_costs = top_costs[0 : int(0.01 * lp.NumVars)]
+    top_5_costs = top_costs[0 : int(0.05 * lp.NumVars)]
+    top_10_costs = top_costs[0 : int(0.10 * lp.NumVars)]
+    top_20_costs = top_costs[0 : int(0.20 * lp.NumVars)]
+
+    is_top_1_cost = np.array(
+        [1 if i in top_1_costs else 0 for i in range(len(variables))]
+    )
+    is_top_5_cost = np.array(
+        [1 if i in top_5_costs else 0 for i in range(len(variables))]
+    )
+    is_top_10_cost = np.array(
+        [1 if i in top_10_costs else 0 for i in range(len(variables))]
+    )
+    is_top_20_cost = np.array(
+        [1 if i in top_20_costs else 0 for i in range(len(variables))]
+    )
+
+    dataset = np.c_[
+        dataset,
+        cost_vector,
+        cost_bin,
+        normalized_costs,
+        is_top_1_cost,
+        is_top_5_cost,
+        is_top_10_cost,
+        is_top_20_cost,
+    ]
+
+    column_names = column_names + [
+        "cost_vector",
+        "cost_bin",
+        "normalized_costs",
+        "is_top_1_cost",
+        "is_top_5_cost",
+        "is_top_10_cost",
+        "is_top_20_cost",
+    ]
+
+    if polyexp:
+        poly = PolynomialFeatures(2, interaction_only=True)
+        dataset = poly.fit_transform(dataset[:, 2:])
+        column_names = poly.get_feature_names(column_names[2:])
+
+    dataset = np.c_[ids, dataset]
+    column_names = ["variable_id"] + column_names
+
+    return dataset, column_names
+
+
+@dataclass(frozen=True)
+class simple_bound:
+    """
+    A simple bound on a continuous variable.
+    real_var: index of the real variable
+    bound: the scalar bound
+    sense: the sense of the bound (lower or upper)
+    """
+
+    real_var: int
+    bound: float
+    sense: str
+
+
+@dataclass(frozen=True)
+class variable_bound:
+    """
+    A simple bound on a continuous variable.
+    real_var: index of the real variable
+    int_var: index of the integer variable
+    bound: the scalar bound
+    sense: the sense of the bound (lower or upper)
+    """
+
+    real_var: int
+    int_var: int
+    bound: float
+    sense: str
+    scalar: float
+
+
+def is_integer(number, eps=1e-4):
+    if abs(number - round(number)) < eps:
+        return True
+
+
+def parsemip(model):
+    """
+    Parse a Gurobi model into a MIP problem.
+    """
+    matrixA = model.getA().toarray()
+    return matrixA
+
+
+def is_simple_bound(constraint, sense, types):
+    """
+    Check if a constraint is a bound constraint.
+    """
+    non_zero_indices = np.nonzero(constraint)[0]
+    if non_zero_indices.size != 1:
+        return False
+    if sense == "=":
+        return False
+    if types[non_zero_indices[0]] != "C":
+        return False
+    return True
+
+
+def is_var_bound(constraint, types, sense):
+    """
+    Check if a constraint is a bound constraint.
+    """
+    if sense == "=":
+        return False
+    non_zero_indices = np.nonzero(constraint)[0]
+    if non_zero_indices.size != 2:
+        return False
+    non_zero_types = [types[i] for i in non_zero_indices]
+    if non_zero_types.count("C") != 1:
+        return False
+    return True
+
+
+def get_var_bound(constraint, types, sense, rhs):
+    """
+    return the variable bound associated with a constraint
+    """
+    non_zero_indices = np.nonzero(constraint)[0]
+    non_zero_types = [types[i] for i in non_zero_indices]
+    cont_idx = non_zero_indices[non_zero_types.index("C")]
+    # This only works because non_zero_indices has only two elements
+    int_idx = non_zero_indices[non_zero_types.index("C") - 1]
+
+    if sense == "<" and constraint[cont_idx] > 0:
+        bound_sense = "upper"
+    elif sense == "<" and constraint[cont_idx] < 0:
+        bound_sense = "lower"
+    elif sense == ">" and constraint[cont_idx] > 0:
+        bound_sense = "lower"
+    elif sense == ">" and constraint[cont_idx] < 0:
+        bound_sense = "upper"
+
+    bound = -(constraint[int_idx] / constraint[cont_idx])
+
+    scalar = rhs / constraint[cont_idx]
+
+    var_bound = variable_bound(cont_idx, int_idx, bound, bound_sense, scalar)
+
+    return cont_idx, var_bound
+
+
+def get_simple_bound(constraint, sense, rhs):
+    """
+    return the simple bound associated with a constraint
+    """
+    non_zero_indices = np.nonzero(constraint)[0]
+    cont_idx = non_zero_indices[0]
+
+    if sense == "<" and constraint[cont_idx] > 0:
+        bound_sense = "upper"
+    elif sense == "<" and constraint[cont_idx] < 0:
+        bound_sense = "lower"
+    elif sense == ">" and constraint[cont_idx] > 0:
+        bound_sense = "lower"
+    elif sense == ">" and constraint[cont_idx] < 0:
+        bound_sense = "upper"
+
+    sign = 1 if constraint[cont_idx] > 0 else -1
+    scalar = (rhs / constraint[cont_idx]) * sign
+
+    s_bound = simple_bound(cont_idx, scalar, bound_sense)
+
+    return cont_idx, s_bound
+
+
+def print_matrix(matrix):
+    """
+    Print a matrix with no line breaks
+    """
+    for idx, _ in enumerate(matrix):
+        line = ""
+        for jdx, _ in enumerate(matrix[idx]):
+            line += f"{matrix[idx][jdx]:6.2f} "
+        print(line)
+
+
+def is_integer_vector(vector, eps=1e-4):
+    for i in range(len(vector)):
+        if abs(vector[i] - round(vector[i])) > eps:
+            return False
+    return True
+
+
+def get_lb_star(simple_l_bounds, var_l_bounds, x_all):
+    best_s_bound = -float("inf")
+    a_best_s_bound = None
+    best_v_bound = -float("inf")
+    a_best_v_bound = None
+    # NOTE: this assumes that there can be more than one of each type of bound,
+    # which I don't think is true but whatevs
+    for i in simple_l_bounds:
+        if i.bound > best_s_bound:
+            best_s_bound = i.bound
+            a_best_s_bound = i
+    for i in var_l_bounds:
+        if i.bound * x_all[i.int_var] > best_v_bound:
+            best_v_bound = i.bound * x_all[i.int_var]
+            a_best_v_bound = i
+    if best_s_bound > best_v_bound:
+        lb_star = best_s_bound
+        best_bound = a_best_s_bound
+    else:
+        lb_star = best_v_bound
+        best_bound = a_best_v_bound
+    return (lb_star, best_bound)
+
+
+def get_ub_star(simple_u_bounds, var_u_bounds, x_all):
+    best_s_bound = float("inf")
+    a_best_s_bound = None
+    best_v_bound = float("inf")
+    a_best_v_bound = None
+    # NOTE: this assumes that there can be more than one of each type of bound,
+    # which I don't think is true but whatevs
+    for i in simple_u_bounds:
+        if i.bound < best_s_bound:
+            best_s_bound = i.bound
+            a_best_s_bound = i
+    for i in var_u_bounds:
+        if i.bound * x_all[i.int_var] < best_v_bound:
+            best_v_bound = i.bound * x_all[i.int_var]
+            a_best_v_bound = i
+    if best_s_bound < best_v_bound:
+        ub_star = best_s_bound
+        best_bound = a_best_s_bound
+    else:
+        ub_star = best_v_bound
+        best_bound = a_best_v_bound
+    return (ub_star, best_bound)
+
+
+def do_bound_substitution(
+    row,
+    cont_idx,
+    int_idx,
+    var_lbounds,
+    var_ubounds,
+    sim_lbounds,
+    sim_ubounds,
+    solution,
+):
+
+    sub_row = row.copy()
+    lb_star = {}
+    ub_star = {}
+
+    for j in cont_idx:
+        lb_star[j], a_lbstar = get_lb_star(
+            sim_lbounds[j], var_lbounds[j], solution
+        )
+        ub_star[j], a_ubstar = get_ub_star(
+            sim_ubounds[j], var_ubounds[j], solution
+        )
+
+        u_dist = ub_star[j] - solution[j]
+        l_dist = solution[j] - lb_star[j]
+
+        if l_dist <= u_dist:
+            if isinstance(a_lbstar, variable_bound):
+                sub_row[a_lbstar.int_var] += row[j] * a_lbstar.bound
+            else:
+                sub_row[-1] += -row[j] * a_lbstar.bound
+        else:
+            if isinstance(a_ubstar, variable_bound):
+                sub_row[j] = -sub_row[j]
+                sub_row[a_ubstar.int_var] += row[j] * a_ubstar.bound
+            else:
+                sub_row[j] = -sub_row[j]
+                sub_row[-1] += -row[j] * a_ubstar.bound
+
+    for j in cont_idx:
+        if sub_row[j] > 0:
+            sub_row[j] = 0
+
+    return sub_row
+
+
+def big_f(subscript, paren):
+    frac_f = paren - math.floor(paren)
+    val = math.floor(paren) + (max(0, frac_f - subscript) / (1 - subscript))
+    return val
+
+
+def f_bar(subscript, paren):
+    val = min(0, (paren / (1 - subscript)))
+    return val

@@ -9,7 +9,8 @@ import gurobipy as gp
 import joblib as jb
 from sklearn.preprocessing import StandardScaler
 from mirsep import Mirsep
-from utils import features
+from woltersep import Wolter
+from utils import var_features
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-problem", type=int, default=0)
@@ -30,29 +31,30 @@ all_instances.sort()
 problem_name = all_instances[args.problem].split(sep=".")[0]
 directory = (
     # "/blue/akazachkov/o.guaje/" + "gooddata/" + problem_name + "/"
-    "./goodfiles/"
+    # "./goodfiles/"
+    "/home/oguaje/scratch/goodfiles/"
     + problem_name
     + "/"
 )
 
-opt_threshold = np.load(
-    "./models/" + problem_name + "/optimal_threshold_" + problem_name + ".npy"
-)
-opt_threshold = opt_threshold[0]
+with open(directory + "optimal_threshold.txt") as f:
+    lines = f.readlines()
 
-learned_model = jb.load(
-    "./models/"
-    + problem_name
-    + "/GB_classifier_model___"
-    + problem_name
-    + ".joblib"
-)
+opt_threshold = eval(lines[0])
+
+learned_model = jb.load(directory + "classifier.joblib")
 
 read_dir = directory + "random/"
 
 alphas_dir = directory + "reduced_cuts/" + str(instance_idx).zfill(4) + "/"
 try:
     os.makedirs(alphas_dir, exist_ok=True)
+except FileExistsError:
+    pass
+
+heur_alpha_dir = directory + "redu_heur_cuts/" + str(args.index).zfill(4) + "/"
+try:
+    os.makedirs(heur_alpha_dir, exist_ok=True)
 except FileExistsError:
     pass
 
@@ -109,8 +111,6 @@ print("Solved relaxation")
 
 lp_base = lp.ObjVal
 solution = [v.x for v in lp.getVars()]
-old_solution = copy.deepcopy(solution)
-
 
 logfile = logs_dir + instance_id + "_"
 
@@ -123,7 +123,7 @@ except FileExistsError:
 
 instance_name = str(instance_idx).zfill(4)
 outputfile = results_dir + instance_name + ".txt"
-problemfile = results_dir + "problems_" + instance_name + ".txt"
+problemfile = results_dir + "problems.txt"
 
 rounds = 0
 continuar = True
@@ -136,18 +136,37 @@ noc = time.process_time()
 print("created separator in ", toc - tic, "wall seconds")
 print("created separator in ", noc - nic, "cpu seconds")
 
-this_dataset, feature_names = features(lp, np.array(solution), var_types)
+this_dataset, feature_names = var_features(lp, np.array(solution), var_types)
 this_dataset = pd.DataFrame(this_dataset, columns=feature_names)
-this_dataset["instance_id"] = [instance_idx] * this_dataset.shape[0]
-this_dataset["cut_iter"] = [rounds] * this_dataset.shape[0]
+# this_dataset["instance_id"] = [instance_idx] * this_dataset.shape[0]
+# this_dataset["cut_iter"] = [rounds] * this_dataset.shape[0]
 
 scaler = StandardScaler()
 this_dataset = scaler.fit_transform(this_dataset)
 
+threshold_reductions = 0
+
+threshold = opt_threshold * (1 / (2**threshold_reductions))
+
 predictions = learned_model.predict_proba(this_dataset)
-predictions = [1 if p[1] > opt_threshold else 0 for p in predictions]
+predictions = [1 if p[1] > threshold else 0 for p in predictions]
 
 while continuar:
+    lp_solution = [v.X for v in lp.getVars()]
+
+    slacks = [abs(cons.Slack) for cons in lp.getConstrs()]
+    slacks = slacks[: ip.NumConstrs]
+    duals = [abs(cons.Pi) for cons in lp.getConstrs()]
+    duals = slacks[: ip.NumConstrs]
+
+    heuristic_separator = Wolter(ip, solution, slacks, duals)
+
+    heuristic_cuts = heuristic_separator.generate_cuts()
+    pd.DataFrame(lp_solution).to_csv(
+        sols_dir + str(rounds) + ".csv",
+        index=False,
+        header=False,
+    )
     print("Starting separation round ", rounds)
     tic = time.time()
     nic = time.process_time()
@@ -168,6 +187,8 @@ while continuar:
             " broke in separation with status ",
             separator.model.status,
         )
+        with open(problemfile, "a") as f:
+            f.write(instance_name + "\t broke in separation\n")
         sys.exit()
 
     cuts = separator.get_cuts()
@@ -188,28 +209,8 @@ while continuar:
                     for j in range(len(int_solution))
                 ]
             )
-            < cuts[i][-1]
+            > cuts[i][-1]
         ):
-            line = str(
-                np.sum(
-                    [
-                        cuts[i][j] * int_solution[j]
-                        for j in range(len(int_solution))
-                    ]
-                )
-            )
-            line = line + " " + str(cuts[i][-1])
-            with open(problemfile, "a") as f:
-                f.write(
-                    "invalid cut"
-                    + str(i)
-                    + " in round "
-                    + str(rounds)
-                    + " "
-                    + line
-                    + "\n"
-                )
-        else:
             valid_cuts.append(i)
             lp.addConstr(
                 gp.quicksum(
@@ -221,6 +222,31 @@ while continuar:
                 >= cuts[i][-1],
                 name="cgmipcut",
             )
+            lp.update()
+
+    num_heur_cuts = len(heuristic_cuts)
+    variables = lp.getVars()
+    for i in range(num_heur_cuts):
+        if (
+            np.sum(
+                [
+                    heuristic_cuts[i][j] * int_solution[j]
+                    for j in range(len(int_solution))
+                ]
+            )
+            < heuristic_cuts[i][-1]
+        ):
+            lp.addConstr(
+                gp.quicksum(
+                    [
+                        heuristic_cuts[i][j] * variables[j]
+                        for j in range(len(int_solution))
+                    ]
+                )
+                <= heuristic_cuts[i][-1],
+                name="heuriticcut",
+            )
+            lp.update()
 
     toc = time.time()
     noc = time.process_time()
@@ -230,25 +256,6 @@ while continuar:
     lp.update()
     lp.optimize()
 
-    lp_solution = [v.x for v in lp.getVars()]
-    pd.DataFrame(lp_solution).to_csv(
-        sols_dir + str(rounds) + ".csv",
-        index=False,
-        header=False,
-    )
-
-    # active_cuts = []
-    # for i in valid_cuts:
-    #     if (
-    #         abs(np.sum(
-    #             [
-    #                 cuts[i][j] * int_solution[j]
-    #                 for j in range(len(int_solution))
-    #             ]
-    #         ) - cuts[i][-1]) < 1e-6
-    #     ):
-    #         active_cuts.append(i)
-
     # pd.DataFrame([lambdas[i] for i in active_cuts]).to_csv(
     pd.DataFrame([lambdas[i] for i in valid_cuts]).to_csv(
         multipliers_dir + str(rounds) + ".csv",
@@ -257,6 +264,11 @@ while continuar:
     )
     pd.DataFrame([cuts[i] for i in valid_cuts]).to_csv(
         alphas_dir + str(rounds) + ".csv",
+        index=False,
+        header=False,
+    )
+    pd.DataFrame(heuristic_cuts).to_csv(
+        heur_alpha_dir + str(rounds) + ".csv",
         index=False,
         header=False,
     )
@@ -282,6 +294,10 @@ while continuar:
         + str(gap_closed_all)
         + ", "
         + str(separator.model.MIPGap)
+        + ", "
+        + str(len(heuristic_cuts))
+        + ","
+        + str(threshold_reductions)
         + "\n"
     )
 
@@ -289,10 +305,6 @@ while continuar:
         f.write(line)
 
     new_solution = np.array([var.X for var in lp.getVars()])
-    comparisons = [
-        np.allclose(old_solution[i], new_solution, atol=1.0e-4)
-        for i in range(len(new_solution))
-    ]
     if not np.allclose(new_solution, solution):
         solution = copy.deepcopy(new_solution)
         rounds = rounds + 1
@@ -300,28 +312,36 @@ while continuar:
         nic = time.process_time()
         separator.update_solution(solution)
 
-        this_dataset, feature_names = features(
-            lp, solution, var_types, orig=ip.NumConstrs
-        )
+        this_dataset, feature_names = var_features(lp, solution, var_types)
         this_dataset = pd.DataFrame(this_dataset, columns=feature_names)
-        this_dataset["instance_id"] = [instance_idx] * this_dataset.shape[0]
-        this_dataset["cut_iter"] = [rounds] * this_dataset.shape[0]
+        # this_dataset["instance_id"] = [instance_idx] * this_dataset.shape[0]
+        # this_dataset["cut_iter"] = [rounds] * this_dataset.shape[0]
 
         scalar = StandardScaler()
         this_dataset = scaler.fit_transform(this_dataset)
 
+        threshold_reductions = 0
+        threshold = opt_threshold * (1 / (2**threshold_reductions))
         predictions = learned_model.predict_proba(this_dataset)
-        predictions = [1 if p[1] > opt_threshold else 0 for p in predictions]
+        predictions = [1 if p[1] > threshold else 0 for p in predictions]
 
         toc = time.time()
         noc = time.process_time()
         print("updated solution in ", toc - tic, "wall seconds")
         print("updated solution in ", noc - nic, "cpu seconds")
     else:
-        continuar = False
-        print("point is not separated")
-        with open(problemfile, "a") as f:
-            f.write("Point is not separated\n")
+        if threshold_reductions < 5:
+            rounds = rounds + 1
+            threshold_reductions += 1
+            threshold = opt_threshold * (1 / (2**threshold_reductions))
+            predictions = learned_model.predict_proba(this_dataset)
+            predictions = [1 if p[1] > threshold else 0 for p in predictions]
+
+        else:
+            continuar = False
+            print("point is not separated")
+            with open(problemfile, "a") as f:
+                f.write("Point is not separated\n")
     if gap_closed_all >= 100:
         continuar = False
         print("closed all gap")

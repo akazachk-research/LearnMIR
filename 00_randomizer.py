@@ -7,7 +7,7 @@ import os
 import gurobipy as gp
 import numpy as np
 import argparse
-from utils import is_integer, existing_sol
+from utils import is_integer_sol, existing_sol
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-problem", type=int, default=0)
@@ -92,17 +92,29 @@ while num_instances < max_instances and tries < 10000:
     ########################################################
 
     m_copy.update()
+    m_copy.optimize()
 
     m_relax = m_copy.relax()
     m_relax.optimize()
+
+    ip_obj = m_copy.ObjVal
+    lp_obj = m_relax.ObjVal
+
+    if abs(ip_obj) < 1e-6:
+        gap = abs(ip_obj - lp_obj) / (1e-6)
+    else:
+        gap = abs(ip_obj - lp_obj) / abs(ip_obj)
 
     current_sol = np.array([var.X for var in m_relax.getVars()])
 
     # print(existing_sol(solutions, current_sol), "solution exists")
     # print(not is_integer(current_sol), "solution is fractional")
 
-    if not existing_sol(solutions, current_sol) and not is_integer(
-        current_sol
+    if (
+        not existing_sol(solutions, current_sol)
+        and not is_integer_sol(current_sol)
+        and gap > 1e-4
+        and abs(ip_obj) > 1e-6
     ):
         solutions.append(current_sol)
         filename = instances_path + str(num_instances).zfill(4) + ".mps"

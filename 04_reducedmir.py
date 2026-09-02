@@ -1,8 +1,3 @@
-##############################################################################
-# Learning to Cut. Oscar Guaje, Arnaud Deza, Aleksandr Kazachkov, Elias Khalil
-# Script to run the complete cutting loop for a given instance.
-##############################################################################
-
 import sys
 import os
 import copy
@@ -11,14 +6,20 @@ import argparse
 import numpy as np
 import pandas as pd
 import gurobipy as gp
+import joblib as jb
+from sklearn.preprocessing import StandardScaler
 from mirsep import Mirsep
 from woltersep import Wolter
+from utils import var_features
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-problem", type=int, default=0)
 parser.add_argument("-index", type=int, default=0)
 args = parser.parse_args()
 
+instance_idx = args.index
+
+# base_dir = "/blue/akazachkov/o.guaje/goodinstances/"
 base_dir = "./goodinstances/"
 all_instances = os.listdir(base_dir)
 for file in all_instances:
@@ -35,33 +36,42 @@ directory = (
     + "/"
 )
 
+with open(directory + "optimal_threshold.txt") as f:
+    lines = f.readlines()
+
+opt_threshold = eval(lines[0])
+
+learned_model = jb.load(directory + "classifier.joblib")
+
 read_dir = directory + "random/"
 
-alphas_dir = directory + "full_cuts/" + str(args.index).zfill(4) + "/"
+alphas_dir = directory + "reduced_cuts/" + str(instance_idx).zfill(4) + "/"
 try:
     os.makedirs(alphas_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-heur_alpha_dir = directory + "full_heur_cuts/" + str(args.index).zfill(4) + "/"
+heur_alpha_dir = directory + "redu_heur_cuts/" + str(args.index).zfill(4) + "/"
 try:
     os.makedirs(heur_alpha_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-sols_dir = directory + "full_sols/" + str(args.index).zfill(4) + "/"
+sols_dir = directory + "reduced_sols/" + str(instance_idx).zfill(4) + "/"
 try:
     os.makedirs(sols_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-multipliers_dir = directory + "full_lambdas/" + str(args.index).zfill(4) + "/"
+multipliers_dir = (
+    directory + "reduced_lambdas/" + str(instance_idx).zfill(4) + "/"
+)
 try:
     os.makedirs(multipliers_dir, exist_ok=True)
 except FileExistsError:
     pass
 
-logs_dir = directory + "base_logs/" + str(args.index).zfill(4) + "/"
+logs_dir = directory + "reduced_logs/" + str(instance_idx).zfill(4) + "/"
 try:
     os.makedirs(logs_dir, exist_ok=True)
 except FileExistsError:
@@ -71,7 +81,7 @@ except FileExistsError:
 instance = all_instances[args.problem]
 instance_id = instance.split(sep=".")[0]
 
-ip = gp.read(read_dir + str(args.index).zfill(4) + ".mps")
+ip = gp.read(read_dir + str(instance_idx).zfill(4) + ".mps")
 
 ip.Params.OutputFlag = 0
 ip.Params.LogFile = ""
@@ -89,7 +99,8 @@ if ip.Status != 2:
 
 ip_val = ip.ObjVal
 
-int_solution = [v.X for v in ip.getVars()]
+int_solution = [v.x for v in ip.getVars()]
+var_types = ip.getAttr("VType")
 
 lp = ip.relax()
 
@@ -98,18 +109,18 @@ lp.optimize()
 print("Solved relaxation")
 
 lp_base = lp.ObjVal
-solution = [v.X for v in lp.getVars()]
+solution = [v.x for v in lp.getVars()]
 
 logfile = logs_dir + instance_id + "_"
 
 # results_dir = "/blue/akazachkov/o.guaje/results/"
-results_dir = directory + "results/"
+results_dir = directory + "reduced_results/"
 try:
     os.mkdir(results_dir)
 except FileExistsError:
     pass
 
-instance_name = str(args.index).zfill(4)
+instance_name = str(instance_idx).zfill(4)
 outputfile = results_dir + instance_name + ".txt"
 problemfile = results_dir + "problems_" + instance_name + ".txt"
 
@@ -124,28 +135,39 @@ noc = time.process_time()
 print("created separator in ", toc - tic, "wall seconds")
 print("created separator in ", noc - nic, "cpu seconds")
 
+this_dataset, feature_names = var_features(lp, np.array(solution), var_types)
+this_dataset = pd.DataFrame(this_dataset, columns=feature_names)
+this_dataset["instance_id"] = [instance_idx] * this_dataset.shape[0]
+this_dataset["cut_iter"] = [rounds] * this_dataset.shape[0]
+
+scaler = StandardScaler()
+this_dataset = scaler.fit_transform(this_dataset)
+
+predictions = learned_model.predict_proba(this_dataset)
+predictions = [1 if p[1] > opt_threshold else 0 for p in predictions]
 
 while continuar:
     lp_solution = [v.X for v in lp.getVars()]
 
     slacks = [abs(cons.Slack) for cons in lp.getConstrs()]
-    slacks = slacks[:ip.NumConstrs]
+    slacks = slacks[: ip.NumConstrs]
     duals = [abs(cons.Pi) for cons in lp.getConstrs()]
-    duals = slacks[:ip.NumConstrs]
+    duals = slacks[: ip.NumConstrs]
 
     heuristic_separator = Wolter(ip, solution, slacks, duals)
 
     heuristic_cuts = heuristic_separator.generate_cuts()
-
     pd.DataFrame(lp_solution).to_csv(
         sols_dir + str(rounds) + ".csv",
         index=False,
         header=False,
     )
-    print("Starting separation")
+    print("Starting separation round ", rounds)
     tic = time.time()
     nic = time.process_time()
-    separator.build_model(logs_dir + str(rounds).zfill(4) + ".log")
+    separator.build_model(
+        logs_dir + str(rounds).zfill(4) + ".log", predictions
+    )
     toc = time.time()
     noc = time.process_time()
     print("built model in ", toc - tic, "wall seconds")
@@ -209,7 +231,6 @@ while continuar:
             )
             < heuristic_cuts[i][-1]
         ):
-            # valid_cuts.append(i)
             lp.addConstr(
                 gp.quicksum(
                     [
@@ -270,6 +291,9 @@ while continuar:
         + str(separator.model.MIPGap)
         + ", "
         + str(len(heuristic_cuts))
+        + ","
+        # + str(threshold_reductions)
+        + str(0)
         + "\n"
     )
 
@@ -283,6 +307,18 @@ while continuar:
         tic = time.time()
         nic = time.process_time()
         separator.update_solution(solution)
+
+        this_dataset, feature_names = var_features(lp, solution, var_types)
+        this_dataset = pd.DataFrame(this_dataset, columns=feature_names)
+        # this_dataset["instance_id"] = [instance_idx] * this_dataset.shape[0]
+        # this_dataset["cut_iter"] = [rounds] * this_dataset.shape[0]
+
+        scalar = StandardScaler()
+        this_dataset = scaler.fit_transform(this_dataset)
+
+        predictions = learned_model.predict_proba(this_dataset)
+        predictions = [1 if p[1] > opt_threshold else 0 for p in predictions]
+
         toc = time.time()
         noc = time.process_time()
         print("updated solution in ", toc - tic, "wall seconds")
@@ -291,9 +327,9 @@ while continuar:
         continuar = False
         print("point is not separated")
         with open(problemfile, "a") as f:
-            f.write(instance_name + "\t Point is not separated\n")
+            f.write("Point is not separated\n")
     if gap_closed_all >= 100:
         continuar = False
         print("closed all gap")
         with open(problemfile, "a") as f:
-            f.write(instance_name + "\t Closed all gap\n")
+            f.write("closed all gap\n")

@@ -36,7 +36,7 @@ class Mirsep:
         self.slacks = None
         self.update_solution(solution)
 
-        self.model = None
+        self.model = gp.Model()
         self.timelimit = timelimit
         self.log = None
         # self.epsilon = 1e-4
@@ -52,6 +52,7 @@ class Mirsep:
         self.pi = None
         self.delta = None
         self.delta_k = None
+        self.reductions = []
 
     def build_model(self, logfile, predictions=None):
         self.model = gp.Model("mirsep")
@@ -69,15 +70,6 @@ class Mirsep:
             obj=0,
             name="lambda",
         )
-
-        if predictions is not None:
-            fixed_count = 0
-            for idx, prediction in enumerate(predictions):
-                if prediction <= 1e-6:
-                    fixed_count += 1
-                    self.lambd[idx].LB = 0
-                    self.lambd[idx].UB = 0
-            print("Fixed ", fixed_count, "lambdas to 0")
 
         self.non_zero_v = [
             idx for idx in range(len(self.v_star)) if self.v_star[idx] > 0
@@ -127,6 +119,29 @@ class Mirsep:
         self.delta_k = self.model.addVars(
             self.k_set, obj=self.k_set, name="delta_k"
         )
+
+        if predictions is not None:
+            num_predicted_zeros = len([p for p in predictions if p <= 1e-6])
+            fixed_count = 0
+            for idx, prediction in enumerate(predictions):
+                if prediction <= 1e-6:
+                    if idx in self.non_zero_v:
+                        # fix c to 0
+                        self.c_plus[idx].LB = 0
+                        self.c_plus[idx].UB = 0
+                    if idx in self.non_zero_s:
+                        # fix c to 0
+                        self.c_plus_slack[idx].LB = 0
+                        self.c_plus_slack[idx].UB = 0
+                    if idx in self.non_zero_x:
+                        # fix alpha to 0
+                        fixed_count += 1
+                        self.alpha_hat[idx].LB = 0
+                        self.alpha_hat[idx].UB = 0
+                        self.alpha_bar[idx].LB = 0
+                        self.alpha_bar[idx].UB = 0
+            self.reductions.append((num_predicted_zeros, fixed_count))
+            print("Fixed ", fixed_count, "alphas to 0")
 
         self.model.addConstrs(
             (
